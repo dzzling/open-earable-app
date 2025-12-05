@@ -110,6 +110,12 @@ class BluetoothAutoConnector {
         logger.w('Skipping auto-connect: no permissions granted yet.');
         return;
       }
+
+      connector.connectToSystemDevices();
+    } catch (e, st) {
+      //logger.w('Auto-connect tick failed: $e\n$st');
+    } finally {
+      _running = false;
     }
 
     await connector.connectToSystemDevices();
