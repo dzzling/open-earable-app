@@ -6,18 +6,14 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_platform_widgets/flutter_platform_widgets.dart';
 import 'package:open_earable_flutter/open_earable_flutter.dart';
-import 'package:open_wearable/apps/heart_tracker/model/ppg_filter.dart';
-import 'package:open_wearable/apps/posture_tracker/model/attitude.dart';
-import 'package:open_wearable/view_models/sensor_configuration_provider.dart';
-import 'package:provider/provider.dart';
+import 'package:open_wearable/apps/posture_tracker/model/attitude_tracker.dart';
 import 'package:open_wearable/apps/eargpt_gemini_live/model/audio_player.dart';
+import 'package:open_wearable/apps/eargpt_gemini_live/model/eargpt_sensor_manager.dart'
+    as eargpt;
 import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:firebase_ai/firebase_ai.dart';
 import 'package:lottie/lottie.dart';
-import 'package:open_wearable/apps/posture_tracker/view_model/posture_tracker_view_model.dart';
-import 'package:open_wearable/apps/posture_tracker/model/attitude_tracker.dart';
-import 'package:open_wearable/apps/posture_tracker/model/bad_posture_reminder.dart';
 import 'package:open_wearable/view_models/app_data_storage.dart';
 
 class EargptSensorDebugPage extends StatefulWidget {
@@ -40,10 +36,9 @@ class EargptSensorDebugPage extends StatefulWidget {
 
 class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
     with TickerProviderStateMixin {
-  late final PpgFilter ppgFilter;
   late final AnimationController _animationController;
   late final LiveGenerativeModel model;
-  late final PostureTrackerViewModel _postureViewModel;
+  late final eargpt.EarGPTSensorManager _sensorManager;
 
   LiveSession? _session;
   final AudioRecorder _recorder = AudioRecorder();
@@ -51,43 +46,24 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
   final AudioResponsePlayer _audioResponsePlayer = AudioResponsePlayer();
   bool _isRecording = false;
   bool _conversationActive = false;
-  double? _cachedHeartRate;
-  double? _cachedSkinTemp;
-  StreamSubscription<double>? _heartRateSubscription;
-  StreamSubscription<SensorValue>? _skinTempSubscription;
-  StreamSubscription<ButtonEvent>? _buttonSubscription;
-  bool _ppgSensorAvailable = false;
-  bool _skinTempSensorAvailable = false;
-  late Attitude attitude; // Remove after testing
   static const String _storageAppName = 'eargpt_gemini_live';
   static const String _heartRateStorageKey = 'latest_heart_rate';
   static const String _skinTempStorageKey = 'latest_skin_temperature';
   static const int _historyDays = 7;
 
   //============================================================================
-  // SETUP BUTTON ON EARABLE
+  // BUTTON HANDLER
   //============================================================================
 
-  void _setupButtonListener() {
-    if (widget.wearable != null && widget.wearable is ButtonManager) {
-      _buttonSubscription =
-          (widget.wearable as ButtonManager).buttonEvents.listen((event) {
-        if (event == ButtonEvent.pressed) {
-          logger.i("Button Trigger: Pressed");
-          if (mounted) {
-            setState(() {
-              if (_conversationActive) {
-                _endConversation();
-              } else {
-                _startConversation();
-              }
-            });
-          }
+  void _handleButtonPressed() {
+    if (mounted) {
+      setState(() {
+        if (_conversationActive) {
+          _endConversation();
+        } else {
+          _startConversation();
         }
       });
-      logger.i("Button listener setup complete via ButtonManager.");
-    } else {
-      logger.w("Wearable does not support ButtonManager or is null.");
     }
   }
 
@@ -101,6 +77,27 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
 
     // Initialize animation controller
     _animationController = AnimationController(vsync: this);
+
+    // Initialize SensorManager
+    _sensorManager = eargpt.EarGPTSensorManager(
+      ppgSensor: widget.ppgSensor,
+      skinTempSensor: widget.skinTempSensor,
+      wearable: widget.wearable,
+      attitudeTracker: widget.attitudeTracker,
+      onHeartRateUpdate: (heartRate) {
+        if (mounted) {
+          setState(() {});
+        }
+      },
+      onSkinTempUpdate: (skinTemp) {
+        if (mounted) {
+          setState(() {});
+        }
+      },
+      onAttitudeChanged: () {
+        // Handle attitude changes if needed
+      },
+    );
 
     // Setup Gemini Live Generative Model
     model = FirebaseAI.googleAI().liveGenerativeModel(
@@ -127,258 +124,19 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
     _initializeSensors();
   }
 
-  /// Initialize sensors in a controlled, sequential manner to ensure all components are ready
+  /// Initialize sensors using SensorManager
   Future<void> _initializeSensors() async {
-    final ppgSensor = widget.ppgSensor;
-    final skinTempSensor = widget.skinTempSensor;
-
-    // Wait for the widget tree to be built before accessing context
-    await Future.delayed(const Duration(milliseconds: 100));
-
-    if ((ppgSensor != null) && (skinTempSensor != null)) {
-      try {
-        // Step 1: Configure sensors
-        await _configureSensors(ppgSensor, skinTempSensor);
-
-        // Step 2: Initialize PPG filter
-        await _initializePpgFilter(ppgSensor);
-
-        // Step 3: Setup subscriptions
-        await _setupSensorSubscriptions(ppgSensor, skinTempSensor);
-
-        // Step 4: Initialize posture tracker
-        await _initializePostureTracker();
-
-        // Update availability flags
-        if (mounted) {
-          setState(() {
-            _ppgSensorAvailable = true;
-            _skinTempSensorAvailable = true;
-          });
-        }
-
-        logger.i("All sensors initialized successfully");
-      } catch (e) {
-        logger.w("Error during sensor initialization: $e");
-        if (mounted) {
-          setState(() {
-            _ppgSensorAvailable = false;
-            _skinTempSensorAvailable = false;
-          });
-        }
-      }
-    } else {
-      // If sensors are null, setup dummy streams
-      _setupDummySensors(ppgSensor, skinTempSensor);
-    }
-
-    // Finally, setup button listener after all sensors are initialized
-    _setupButtonListener();
-  }
-
-  /// Configure PPG and skin temperature sensors with proper settings
-  Future<void> _configureSensors(
-    Sensor ppgSensor,
-    Sensor skinTempSensor,
-  ) async {
     if (!mounted) return;
 
-    final configProvider =
-        Provider.of<SensorConfigurationProvider>(context, listen: false);
+    await _sensorManager.initialize(context);
 
-    // Get possible configuration attributes
-    SensorConfiguration ppgConfig = ppgSensor.relatedConfigurations.first;
-    SensorConfiguration skinTempConfig =
-        skinTempSensor.relatedConfigurations.first;
-
-    // Enable streaming from sensor if "stream sensor" is a configuration option
-    if (ppgConfig is ConfigurableSensorConfiguration &&
-        ppgConfig.availableOptions.contains(StreamSensorConfigOption())) {
-      configProvider.addSensorConfigurationOption(
-        ppgConfig,
-        StreamSensorConfigOption(),
-      );
-    }
-
-    if (skinTempConfig is ConfigurableSensorConfiguration &&
-        skinTempConfig.availableOptions.contains(StreamSensorConfigOption())) {
-      configProvider.addSensorConfigurationOption(
-        skinTempConfig,
-        StreamSensorConfigOption(),
-      );
-    }
-
-    // Get possible configuration values for chosen configuration
-    List<SensorConfigurationValue> ppgValues =
-        configProvider.getSensorConfigurationValues(ppgConfig, distinct: true);
-    configProvider.addSensorConfiguration(ppgConfig, ppgValues.first);
-    SensorConfigurationValue selectedPpgValue =
-        configProvider.getSelectedConfigurationValue(ppgConfig)!;
-    ppgConfig.setConfiguration(selectedPpgValue);
-
-    List<SensorConfigurationValue> skinTempValues = configProvider
-        .getSensorConfigurationValues(skinTempConfig, distinct: true);
-    configProvider.addSensorConfiguration(
-      skinTempConfig,
-      skinTempValues.first,
-    );
-    SensorConfigurationValue selectedSkinTempValue =
-        configProvider.getSelectedConfigurationValue(skinTempConfig)!;
-    skinTempConfig.setConfiguration(selectedSkinTempValue);
-
-    logger.i("Sensors configured successfully");
-
-    // Small delay to allow configuration to propagate
-    await Future.delayed(const Duration(milliseconds: 50));
-  }
-
-  /// Initialize PPG filter with proper sample frequency
-  Future<void> _initializePpgFilter(Sensor ppgSensor) async {
-    final configProvider =
-        Provider.of<SensorConfigurationProvider>(context, listen: false);
-    SensorConfiguration ppgConfig = ppgSensor.relatedConfigurations.first;
-    SensorConfigurationValue selectedValue =
-        configProvider.getSelectedConfigurationValue(ppgConfig)!;
-
-    double sampleFreq = 25;
-    if (selectedValue is SensorFrequencyConfigurationValue) {
-      sampleFreq = selectedValue.frequencyHz;
-    }
+    // Setup button listener after sensors are initialized
+    _sensorManager.setupButtonListener(_handleButtonPressed);
 
     if (mounted) {
-      setState(() {
-        ppgFilter = PpgFilter(
-          inputStream: ppgSensor.sensorStream.asyncMap((data) {
-            SensorDoubleValue sensorData = data as SensorDoubleValue;
-            return (
-              sensorData.timestamp,
-              -(sensorData.values[2] + sensorData.values[3])
-            );
-          }).asBroadcastStream(),
-          sampleFreq: sampleFreq,
-          timestampExponent: ppgSensor.timestampExponent,
-        );
-      });
+      setState(() {});
     }
-
-    logger.i("PPG filter initialized with sample freq: $sampleFreq Hz");
-
-    // Allow filter to initialize
-    await Future.delayed(const Duration(milliseconds: 100));
   }
-
-  /// Setup subscriptions to sensor streams
-  Future<void> _setupSensorSubscriptions(
-    Sensor ppgSensor,
-    Sensor skinTempSensor,
-  ) async {
-    // Subscribe to heart rate stream
-    final heartRateStream = ppgFilter.heartRateStream;
-    _heartRateSubscription = heartRateStream.listen((heartRate) {
-      if (mounted) {
-        setState(() {
-          _cachedHeartRate = heartRate;
-        });
-      }
-      logger.i('Heart rate updated: $heartRate BPM');
-    });
-
-    // Subscribe to skin temperature stream
-    _skinTempSubscription = skinTempSensor.sensorStream.listen((data) {
-      final sensorValue = data as SensorDoubleValue;
-      if (mounted) {
-        setState(() {
-          _cachedSkinTemp = sensorValue.values[0];
-        });
-      }
-      logger.i('Skin temp updated: ${sensorValue.values[0]} °C');
-    });
-
-    logger.i("Sensor subscriptions established");
-
-    // Allow streams to start flowing
-    await Future.delayed(const Duration(milliseconds: 100));
-  }
-
-  /// Initialize the posture tracker view model
-  Future<void> _initializePostureTracker() async {
-    _postureViewModel = PostureTrackerViewModel(
-      widget.attitudeTracker,
-      BadPostureReminder(attitudeTracker: widget.attitudeTracker),
-    );
-
-    if (!_postureViewModel.hasLoadedCalibration) {
-      logger.w("PostureTrackerViewModel: No saved calibration loaded.");
-    }
-
-    if (mounted) {
-      setState(() {
-        _postureViewModel.startTracking();
-        _postureViewModel.addListener(_onAttitudeChanged);
-      });
-    }
-
-    logger.i("Posture tracker initialized");
-
-    // Allow posture tracker to start
-    await Future.delayed(const Duration(milliseconds: 100));
-  }
-
-  /// Setup dummy sensors for testing when real sensors are unavailable
-  void _setupDummySensors(Sensor? ppgSensor, Sensor? skinTempSensor) {
-    logger.w("Setting up dummy sensors - real sensors not available");
-
-    double sampleFreq = 25;
-
-    ppgFilter = PpgFilter(
-      inputStream: Stream<(int, double)>.empty(),
-      sampleFreq: sampleFreq,
-      timestampExponent: 0,
-    );
-
-    // Subscribe to heart rate stream
-    final heartRateStream =
-        ppgSensor != null ? ppgFilter.heartRateStream : fakeHeartRateStream;
-    _heartRateSubscription = heartRateStream.listen((heartRate) {
-      if (mounted) {
-        setState(() {
-          _cachedHeartRate = heartRate;
-        });
-      }
-    });
-
-    // Subscribe to skin temperature stream
-    final skinTempStream = skinTempSensor != null
-        ? skinTempSensor.sensorStream
-        : fakeSkinTempStream;
-    _skinTempSubscription = skinTempStream.listen((data) {
-      final sensorValue = data as SensorDoubleValue;
-      if (mounted) {
-        setState(() {
-          _cachedSkinTemp = sensorValue.values[0];
-        });
-      }
-    });
-
-    logger.i("Dummy sensors setup complete");
-  }
-
-  //============================================================================
-  // FAKE STREAMS FOR TESTING
-  //============================================================================
-
-  final fakeHeartRateStream = Stream<double>.periodic(
-    Duration(seconds: 1),
-    (count) => 60 + (count % 40),
-  ).asBroadcastStream();
-
-  final fakeSkinTempStream = Stream<SensorDoubleValue>.periodic(
-    Duration(seconds: 1),
-    (count) => SensorDoubleValue(
-      timestamp: DateTime.now().microsecondsSinceEpoch,
-      values: [36.5 + (count % 5) * 0.1],
-    ),
-  ).asBroadcastStream();
 
   //============================================================================
   // TOOL IMPLEMENTATIONS
@@ -435,13 +193,13 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
 
   // Current heartrate tool
   Future<Map<String, Object?>> fetchHeartrate() async {
-    if (!_ppgSensorAvailable) {
+    if (!_sensorManager.ppgSensorAvailable) {
       throw Exception("PPG sensor not available or not initialized");
     }
 
-    double currentHR = _cachedHeartRate ?? 0.0;
+    double currentHR = _sensorManager.cachedHeartRate ?? 0.0;
 
-    if (_cachedHeartRate == null) {
+    if (_sensorManager.cachedHeartRate == null) {
       throw Exception("Heart rate data not yet available from sensor");
     }
 
@@ -452,14 +210,14 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
 
   // Current skin temperature tool
   Future<Map<String, Object?>> fetchSkinTemp() async {
-    if (!_skinTempSensorAvailable) {
+    if (!_sensorManager.skinTempSensorAvailable) {
       throw Exception(
           "Skin temperature sensor not available or not initialized");
     }
 
-    double currentSkinTemp = _cachedSkinTemp ?? 0.0;
+    double currentSkinTemp = _sensorManager.cachedSkinTemp ?? 0.0;
 
-    if (_cachedSkinTemp == null) {
+    if (_sensorManager.cachedSkinTemp == null) {
       throw Exception("Skin temperature data not yet available from sensor");
     }
 
@@ -470,12 +228,13 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
 
   // Latest posture tool
   Future<Map<String, Object?>> fetchPosture() async {
-    if (!_postureViewModel.hasLoadedCalibration) {
+    if (!_sensorManager.postureViewModel.hasLoadedCalibration) {
       throw Exception("Posture tracker not calibrated or not initialized");
     }
 
-    final currentAttitude = _postureViewModel.attitude;
-    final badPostureSettings = _postureViewModel.badPostureSettings;
+    final currentAttitude = _sensorManager.postureViewModel.attitude;
+    final badPostureSettings =
+        _sensorManager.postureViewModel.badPostureSettings;
 
     // Convert radians to degrees
     final rollDegrees = currentAttitude.roll.abs() * (360 / (2 * 3.14159));
@@ -669,7 +428,7 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
   Future<void> _saveLatestHeartRate() async {
     await _saveLatestVital(
       _heartRateStorageKey,
-      _cachedHeartRate,
+      _sensorManager.cachedHeartRate,
       'bpm',
     );
   }
@@ -678,7 +437,7 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
   Future<void> _saveLatestSkinTemperature() async {
     await _saveLatestVital(
       _skinTempStorageKey,
-      _cachedSkinTemp,
+      _sensorManager.cachedSkinTemp,
       'celsius',
     );
   }
@@ -986,22 +745,10 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
     }
   }
 
-  // Remove after testing
-  void _onAttitudeChanged() {
-    attitude = _postureViewModel.attitude;
-    /* logger.i(
-        'Attitude changed - Roll: ${attitude.roll}, Pitch: ${attitude.pitch}, Yaw: ${attitude.yaw}',
-      ); */
-  }
-
   @override
   void dispose() {
     _animationController.dispose();
-    _heartRateSubscription?.cancel();
-    _buttonSubscription?.cancel();
-    _postureViewModel.removeListener(_onAttitudeChanged);
-    _postureViewModel.stopTracking();
-    _skinTempSubscription?.cancel();
+    _sensorManager.dispose();
     super.dispose();
   }
 
@@ -1036,8 +783,8 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
                 Column(
                   children: [
                     PlatformText(
-                      "Heart Rate: ${_cachedHeartRate?.toStringAsFixed(1) ?? '--'} BPM\n"
-                      "Skin Temp: ${_cachedSkinTemp?.toStringAsFixed(1) ?? '--'} °C",
+                      "Heart Rate: ${_sensorManager.cachedHeartRate?.toStringAsFixed(1) ?? '--'} BPM\n"
+                      "Skin Temp: ${_sensorManager.cachedSkinTemp?.toStringAsFixed(1) ?? '--'} °C",
                       style: Theme.of(context).textTheme.titleLarge,
                       softWrap: true,
                       textAlign: TextAlign.center,
