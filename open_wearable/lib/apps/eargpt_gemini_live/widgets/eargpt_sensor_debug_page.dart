@@ -1,17 +1,14 @@
 // ignore_for_file: invalid_use_of_internal_member
 
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_platform_widgets/flutter_platform_widgets.dart';
 import 'package:open_earable_flutter/open_earable_flutter.dart';
 import 'package:open_wearable/apps/posture_tracker/model/attitude_tracker.dart';
-import 'package:open_wearable/apps/eargpt_gemini_live/model/audio_player.dart';
 import 'package:open_wearable/apps/eargpt_gemini_live/model/eargpt_sensor_manager.dart'
     as eargpt;
-import 'package:record/record.dart';
-import 'package:audioplayers/audioplayers.dart';
+import 'package:open_wearable/apps/eargpt_gemini_live/model/gemini_session_manager.dart';
 import 'package:firebase_ai/firebase_ai.dart';
 import 'package:lottie/lottie.dart';
 import 'package:open_wearable/view_models/app_data_storage.dart';
@@ -39,13 +36,8 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
   late final AnimationController _animationController;
   late final LiveGenerativeModel model;
   late final eargpt.EarGPTSensorManager _sensorManager;
+  late final GeminiSessionManager _sessionManager;
 
-  LiveSession? _session;
-  final AudioRecorder _recorder = AudioRecorder();
-  final List<Uint8List> _receivedAudioBuffer = [];
-  final AudioResponsePlayer _audioResponsePlayer = AudioResponsePlayer();
-  bool _isRecording = false;
-  bool _conversationActive = false;
   static const String _storageAppName = 'eargpt_gemini_live';
   static const String _heartRateStorageKey = 'latest_heart_rate';
   static const String _skinTempStorageKey = 'latest_skin_temperature';
@@ -58,10 +50,10 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
   void _handleButtonPressed() {
     if (mounted) {
       setState(() {
-        if (_conversationActive) {
-          _endConversation();
+        if (_sessionManager.conversationActive) {
+          _sessionManager.endConversation();
         } else {
-          _startConversation();
+          _sessionManager.startConversation();
         }
       });
     }
@@ -118,6 +110,23 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
       ],
       liveGenerationConfig:
           LiveGenerationConfig(responseModalities: [ResponseModalities.audio]),
+    );
+
+    // Initialize GeminiSessionManager
+    _sessionManager = GeminiSessionManager(
+      model: model,
+      toolExecutors: _toolExecutors,
+      onConversationStateChanged: () {
+        if (mounted) setState(() {});
+      },
+      onRecordingStateChanged: () {
+        if (mounted) {
+          setState(() {
+            _syncAnimationWithRecordingState();
+          });
+        }
+      },
+      onPersistVitals: _persistLatestVitals,
     );
 
     // Setup sensors and data streams asynchronously to ensure proper sequencing
@@ -447,301 +456,17 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
   //============================================================================
 
   void _syncAnimationWithRecordingState() {
-    if (_isRecording && _animationController.isAnimating) {
-      //_animationController.reverse();
-      //_animationController.repeat();
-      //_animationController.stop();
-      //_animationController.reset();
+    if (_sessionManager.isRecording && _animationController.isAnimating) {
       _animationController.animateBack(0.0);
-    } else if (!_isRecording &&
+    } else if (!_sessionManager.isRecording &&
         !_animationController.isAnimating &&
-        _conversationActive) {
+        _sessionManager.conversationActive) {
       _animationController.forward();
       _animationController.repeat();
-      //_animationController.fling(velocity: 1.0);
-    } else if (!_conversationActive && _animationController.isAnimating) {
+    } else if (!_sessionManager.conversationActive &&
+        _animationController.isAnimating) {
       _animationController.stop();
       _animationController.reset();
-    }
-  }
-
-  //============================================================================
-  // HANDLE CONVERSATION
-  //============================================================================
-
-  Future<void> _initSession() async {
-    try {
-      _session = await model.connect();
-      _conversationActive = true;
-    } catch (e) {
-      logger.w('Failed to initialize model session: $e');
-    }
-  }
-
-  Future<void> _startConversation() async {
-    await _initSession();
-    await _startRecording();
-  }
-
-  Future<void> _endConversation() async {
-    logger.i("Ending conversation...");
-    _conversationActive = false;
-    _session?.close();
-    await _stopRecording();
-    await _persistLatestVitals();
-    _receivedAudioBuffer.clear();
-    await _audioResponsePlayer.stopAndClear();
-    logger.i("Cleared audio buffer on conversation end.");
-  }
-
-  Future<void> _startRecording() async {
-    if (_isRecording) return;
-
-    if (_audioResponsePlayer.player.state == PlayerState.playing) {
-      return;
-    }
-
-    logger.i("Starting recording...");
-    setState(() {
-      _isRecording = true;
-      _syncAnimationWithRecordingState();
-    });
-
-    if (await _recorder.hasPermission()) {
-      try {
-        final audioRecordStream = await _recorder.startStream(
-          const RecordConfig(
-            encoder: AudioEncoder.pcm16bits,
-            sampleRate: 16000,
-            numChannels: 1,
-          ),
-        );
-        await Future.wait([
-          _sendAudioLoop(audioRecordStream),
-          _receiveResponseLoop(),
-        ]);
-      } catch (e) {
-        logger.w("Error in recording loop: $e");
-        setState(() {
-          _isRecording = false;
-          _syncAnimationWithRecordingState();
-        });
-        rethrow;
-      }
-    } else {
-      logger.w("Recording permission denied");
-      setState(() {
-        _isRecording = false;
-        _syncAnimationWithRecordingState();
-      });
-      throw Exception("Recording permission denied");
-    }
-  }
-
-  Future<void> _stopRecording() async {
-    logger.i("Stopping recording...");
-    if (_isRecording) {
-      final _ = await _recorder.stop();
-      setState(() {
-        _isRecording = false;
-        _syncAnimationWithRecordingState();
-      });
-    } else {
-      logger.i("Recording already stopped.");
-    }
-  }
-
-  Future<void> _sendAudioLoop(Stream<Uint8List> audioStream) async {
-    logger.i("Sending audio to Gemini...");
-    await for (final data in audioStream) {
-      if (!_conversationActive) {
-        break;
-      }
-      //logger.i("Sending audio chunk of size: ${data.length}");
-      await _session?.sendAudioRealtime(InlineDataPart('audio/pcm', data));
-
-      //await _session?.
-    }
-  }
-
-  Future<void> _receiveResponseLoop() async {
-    logger.i("Receiving responses from Gemini...");
-    try {
-      await for (final message in _session!.receive()) {
-        if (!_conversationActive) {
-          break;
-        }
-        logger.i("Received message from Gemini: $message");
-
-        await _handleLiveServerMessage(message);
-      }
-      // Stream completed normally (session closed by API)
-      logger.i("Session stream completed - session closed by API");
-      if (_conversationActive) {
-        setState(() {
-          _conversationActive = false;
-        });
-        await _stopRecording();
-        await _audioResponsePlayer.stopAndClear();
-      }
-    } catch (e) {
-      // Stream errored (session closed unexpectedly)
-      logger.w("Session stream error: $e");
-      if (_conversationActive) {
-        setState(() {
-          _conversationActive = false;
-        });
-        await _stopRecording();
-        await _audioResponsePlayer.stopAndClear();
-      }
-    }
-  }
-
-  //============================================================================
-  // HANDLE INCOMING MESSAGES FROM MODEL
-  //============================================================================
-
-  Future<void> _handleLiveServerMessage(LiveServerResponse response) async {
-    final message = response.message;
-
-    logger.i("Response message type: $message");
-
-    if (message is LiveServerToolCall &&
-        message.functionCalls?.isNotEmpty == true) {
-      //============================================================================
-      // FUNCTION/TOOL CALLS
-      //============================================================================
-
-      // Extract requested function calls
-      final functionCalls = message.functionCalls!;
-      // Prepare responses
-      final responses = <FunctionResponse>[];
-
-      //Iterate over each function call
-      for (final functionCall in functionCalls) {
-        logger.w("Received tool call: ${functionCall.name}");
-
-        // Check if we have an executor for this tool
-        final executor = _toolExecutors[functionCall.name];
-        if (executor != null) {
-          try {
-            // Execute the tool and get result
-            final result = await executor();
-            responses.add(
-              FunctionResponse(functionCall.name, result, id: functionCall.id),
-            );
-            logger.i(
-              "Prepared function response for ${functionCall.name}: $result",
-            );
-          } catch (e) {
-            // Handle execution errors
-            logger.w("Error executing tool '${functionCall.name}': $e");
-            responses.add(
-              FunctionResponse(
-                functionCall.name,
-                {'error': e.toString()},
-                id: functionCall.id,
-              ),
-            );
-          }
-        } else {
-          // Unknown tool requested
-          logger.w('Unknown function call: ${functionCall.name}');
-          // Send error response to the model
-          responses.add(
-            FunctionResponse(
-              functionCall.name,
-              {'error': "Unknown tool '${functionCall.name}'"},
-              id: functionCall.id,
-            ),
-          );
-        }
-      }
-      // Send all tool responses back to the model in one batch
-      if (responses.isNotEmpty) {
-        _session?.sendToolResponse(responses);
-        logger.i("Sent ${responses.length} tool response(s).");
-      }
-    } else if (message is LiveServerContent) {
-      // As soon as we receive something, stop recording to avoid overlap.
-      if (_isRecording) {
-        await _stopRecording();
-        await Future.delayed(const Duration(milliseconds: 100));
-      }
-      logger.i("1st Turn Complete: ${message.turnComplete}");
-      if (message.modelTurn != null) {
-        await _handleLiveServerContent(message, message.turnComplete);
-      } else if (message.turnComplete == true) {
-        // await _stopRecording();
-        // await _audioResponsePlayer.playBuffered(_receivedAudioBuffer);
-        // Poll every 10ms until playback completes, then (if conversation still active) restart recording.
-        int pollCount = 0;
-        const maxPollCount = 500; // 5 seconds max
-        while (_conversationActive &&
-            _audioResponsePlayer.player.state != PlayerState.completed &&
-            _audioResponsePlayer.player.state != PlayerState.stopped &&
-            _audioResponsePlayer.player.state != PlayerState.disposed &&
-            pollCount < maxPollCount) {
-          await Future.delayed(const Duration(milliseconds: 10));
-          pollCount++;
-        }
-
-        if (pollCount >= maxPollCount) {
-          logger.w("Playback polling timeout after ${pollCount * 10}ms");
-        }
-
-        logger.i(
-          "Player state after waiting: ${_audioResponsePlayer.player.state.toString()}",
-        );
-
-        if (_conversationActive && !_isRecording) {
-          try {
-            await Future.delayed(const Duration(milliseconds: 200));
-            await _startRecording();
-          } catch (e) {
-            logger.w("Failed to restart recording: $e");
-            // If recording fails (e.g., audio focus lost), end conversation
-            await _endConversation();
-          }
-        }
-      }
-    } else {
-      logger.w("Unhandled message type: ${message.runtimeType}");
-    }
-  }
-
-  Future<void> _handleLiveServerContent(
-    LiveServerContent response,
-    bool? hasCompletedMessage,
-  ) async {
-    final partList = response.modelTurn?.parts;
-    if (partList != null) {
-      for (final part in partList) {
-        if (part is InlineDataPart) {
-          await _handleInlineDataPart(part, hasCompletedMessage);
-        } else {
-          logger.w('receive part with unknown type ${part.runtimeType}');
-        }
-      }
-    } else {
-      logger.w("No parts in model turn.");
-    }
-  }
-
-  Future<void> _handleInlineDataPart(
-    InlineDataPart part,
-    bool? hasCompletedMessage,
-  ) async {
-    if (part.mimeType.startsWith('audio')) {
-      logger.i("Handling audio part with mimeType: ${part.mimeType}");
-      final audioBytes = part.bytes;
-      logger.i("Enqueueing audio chunk of size: ${audioBytes.length}");
-      // previously: _receivedAudioBuffer.add(audioBytes);
-      _audioResponsePlayer.enqueue(audioBytes);
-    } else {
-      logger.w(
-        "Unhandled InlineDataPart mimeType, does not include audio: ${part.mimeType}",
-      );
     }
   }
 
@@ -749,6 +474,7 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
   void dispose() {
     _animationController.dispose();
     _sensorManager.dispose();
+    _sessionManager.dispose();
     super.dispose();
   }
 
@@ -763,12 +489,16 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
         title: Text("EarGPT Sensor Debug Page"),
       ),
       floatingActionButton: FloatingActionButton.large(
-        foregroundColor: _conversationActive ? Colors.white : Colors.green,
-        backgroundColor: _conversationActive ? Colors.red : Colors.white,
+        foregroundColor:
+            _sessionManager.conversationActive ? Colors.white : Colors.green,
+        backgroundColor:
+            _sessionManager.conversationActive ? Colors.red : Colors.white,
         onPressed: () {
-          _conversationActive ? _endConversation() : _startConversation();
+          _sessionManager.conversationActive
+              ? _sessionManager.endConversation()
+              : _sessionManager.startConversation();
         },
-        child: _conversationActive
+        child: _sessionManager.conversationActive
             ? const Icon(Icons.stop_circle)
             : const Icon(Icons.play_circle),
       ),
@@ -793,12 +523,14 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
                     FloatingActionButton.extended(
                       onPressed: () => {},
                       label: PlatformText(
-                        "Session active: ${_conversationActive ? "Yes" : "No"}",
+                        "Session active: ${_sessionManager.conversationActive ? "Yes" : "No"}",
                       ),
-                      foregroundColor:
-                          _conversationActive ? Colors.white : Colors.white,
-                      backgroundColor:
-                          _conversationActive ? Colors.red : Colors.lightGreen,
+                      foregroundColor: _sessionManager.conversationActive
+                          ? Colors.white
+                          : Colors.white,
+                      backgroundColor: _sessionManager.conversationActive
+                          ? Colors.red
+                          : Colors.lightGreen,
                     ),
                     SizedBox(height: 16),
                     Lottie.asset(
@@ -817,15 +549,18 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
                     FloatingActionButton.extended(
                       onPressed: () => {},
                       label: PlatformText(
-                        _conversationActive
-                            ? _isRecording
+                        _sessionManager.conversationActive
+                            ? _sessionManager.isRecording
                                 ? "Listening..."
                                 : "Talking..."
                             : "Inactive",
                       ),
-                      foregroundColor:
-                          _isRecording ? Colors.white : Colors.black,
-                      backgroundColor: _isRecording ? Colors.red : Colors.white,
+                      foregroundColor: _sessionManager.isRecording
+                          ? Colors.white
+                          : Colors.black,
+                      backgroundColor: _sessionManager.isRecording
+                          ? Colors.red
+                          : Colors.white,
                     ),
                   ],
                 ),
