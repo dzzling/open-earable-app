@@ -6,10 +6,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_platform_widgets/flutter_platform_widgets.dart';
 import 'package:open_earable_flutter/open_earable_flutter.dart';
 import 'package:open_wearable/apps/posture_tracker/model/attitude_tracker.dart';
-import 'package:open_wearable/apps/eargpt_gemini_live/model/eargpt_sensor_manager.dart'
-    as eargpt;
-import 'package:open_wearable/apps/eargpt_gemini_live/model/gemini_session_manager.dart';
-import 'package:open_wearable/apps/eargpt_gemini_live/model/tools.dart';
+import 'package:open_wearable/apps/eargpt_gemini_live/model/eargpt_sensor_manager.dart';
+import 'package:open_wearable/apps/eargpt_gemini_live/model/eargpt_session_manager.dart';
+import 'package:open_wearable/apps/eargpt_gemini_live/model/eargpt_tools.dart';
 import 'package:open_wearable/apps/eargpt_gemini_live/model/data_persistence.dart';
 import 'package:firebase_ai/firebase_ai.dart';
 import 'package:lottie/lottie.dart';
@@ -36,26 +35,10 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
     with TickerProviderStateMixin {
   late final AnimationController _animationController;
   late final LiveGenerativeModel model;
-  late final eargpt.EarGPTSensorManager _sensorManager;
+  late final EarGPTSensorManager _sensorManager;
   late final GeminiSessionManager _sessionManager;
   late final EarGPTTools _tools;
   late final EarGPTDataPersistence _dataPersistence;
-
-  //============================================================================
-  // BUTTON HANDLER
-  //============================================================================
-
-  void _handleButtonPressed() {
-    if (mounted) {
-      setState(() {
-        if (_sessionManager.conversationActive) {
-          _sessionManager.endConversation();
-        } else {
-          _sessionManager.startConversation();
-        }
-      });
-    }
-  }
 
   //============================================================================
   // INIT STATE
@@ -69,7 +52,7 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
     _animationController = AnimationController(vsync: this);
 
     // Initialize SensorManager
-    _sensorManager = eargpt.EarGPTSensorManager(
+    _sensorManager = EarGPTSensorManager(
       ppgSensor: widget.ppgSensor,
       skinTempSensor: widget.skinTempSensor,
       wearable: widget.wearable,
@@ -84,9 +67,7 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
           setState(() {});
         }
       },
-      onAttitudeChanged: () {
-        // Handle attitude changes if needed
-      },
+      onAttitudeChanged: () {},
     );
 
     // Initialize EarGPTTools
@@ -140,6 +121,18 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
 
     if (mounted) {
       setState(() {});
+    }
+  }
+
+  void _handleButtonPressed() {
+    if (mounted) {
+      setState(() {
+        if (_sessionManager.conversationActive) {
+          _sessionManager.endConversation();
+        } else {
+          _sessionManager.startConversation();
+        }
+      });
     }
   }
 
