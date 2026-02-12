@@ -10,9 +10,9 @@ import 'package:open_wearable/apps/eargpt_gemini_live/model/eargpt_sensor_manage
     as eargpt;
 import 'package:open_wearable/apps/eargpt_gemini_live/model/gemini_session_manager.dart';
 import 'package:open_wearable/apps/eargpt_gemini_live/model/tools.dart';
+import 'package:open_wearable/apps/eargpt_gemini_live/model/data_persistence.dart';
 import 'package:firebase_ai/firebase_ai.dart';
 import 'package:lottie/lottie.dart';
-import 'package:open_wearable/view_models/app_data_storage.dart';
 
 class EargptSensorDebugPage extends StatefulWidget {
   final Sensor? ppgSensor;
@@ -39,11 +39,7 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
   late final eargpt.EarGPTSensorManager _sensorManager;
   late final GeminiSessionManager _sessionManager;
   late final EarGPTTools _tools;
-
-  static const String _storageAppName = 'eargpt_gemini_live';
-  static const String _heartRateStorageKey = 'latest_heart_rate';
-  static const String _skinTempStorageKey = 'latest_skin_temperature';
-  static const int _historyDays = 7;
+  late final EarGPTDataPersistence _dataPersistence;
 
   //============================================================================
   // BUTTON HANDLER
@@ -96,6 +92,9 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
     // Initialize EarGPTTools
     _tools = EarGPTTools(sensorManager: _sensorManager);
 
+    // Initialize DataPersistence
+    _dataPersistence = EarGPTDataPersistence(sensorManager: _sensorManager);
+
     // Setup Gemini Live Generative Model
     model = FirebaseAI.googleAI().liveGenerativeModel(
       model: 'gemini-2.5-flash-native-audio-preview-12-2025',
@@ -123,7 +122,7 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
           });
         }
       },
-      onPersistVitals: _persistLatestVitals,
+      onPersistVitals: _dataPersistence.persistLatestVitals,
     );
 
     // Setup sensors and data streams asynchronously to ensure proper sequencing
@@ -142,84 +141,6 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
     if (mounted) {
       setState(() {});
     }
-  }
-
-  //============================================================================
-  // DATA PERSISTENCE
-  //============================================================================
-
-  Future<void> _persistLatestVitals() async {
-    await _saveLatestHeartRate();
-    await _saveLatestSkinTemperature();
-  }
-
-  /// For each vital, save the latest value along with a history of values within the cutoff period (e.g. last 7 days)
-  /// [key] - The storage key for the vital
-  /// [value] - The latest value to store
-  /// [unit] - The unit of the value (e.g., 'bpm', 'celsius')
-  /// [timestamp] - The timestamp of the value
-  /// There will alway be only one latest value stored, together with a rolling history of values within the cutoff period
-  /// There is no older history beyond the cutoff period
-  Future<void> _saveLatestVital(
-    String key,
-    double? value,
-    String unit,
-  ) async {
-    if (value == null) {
-      logger.w("No cached $key to persist.");
-      return;
-    }
-
-    final recordedAt = DateTime.now();
-    final recordedMicros = recordedAt.microsecondsSinceEpoch;
-    final cutoffMicros = recordedAt
-        .subtract(Duration(days: _historyDays))
-        .microsecondsSinceEpoch;
-
-    try {
-      final existing =
-          await AppDataStorage.loadData(_storageAppName, key) ?? {};
-      final historyDynamic = existing['history'] as List<dynamic>? ?? [];
-      final history = historyDynamic.whereType<Map>().where((entry) {
-        final ts = entry['recorded_at_epoch_micros'] as int?;
-        return ts != null && ts >= cutoffMicros;
-      }).toList();
-
-      history.add({
-        'value': value,
-        'unit': unit,
-        'recorded_at': recordedAt.toIso8601String(),
-        'recorded_at_epoch_micros': recordedMicros,
-      });
-
-      final latest = history.last;
-
-      await AppDataStorage.saveData(_storageAppName, key, {
-        'latest': latest,
-        'history': history,
-      });
-      logger.i("Persisted latest $key: $value $unit");
-    } catch (e) {
-      logger.w("Failed to persist $key: $e");
-    }
-  }
-
-  // Save latest heart rate with history
-  Future<void> _saveLatestHeartRate() async {
-    await _saveLatestVital(
-      _heartRateStorageKey,
-      _sensorManager.cachedHeartRate,
-      'bpm',
-    );
-  }
-
-  // Save latest skin temperature with history
-  Future<void> _saveLatestSkinTemperature() async {
-    await _saveLatestVital(
-      _skinTempStorageKey,
-      _sensorManager.cachedSkinTemp,
-      'celsius',
-    );
   }
 
   //============================================================================

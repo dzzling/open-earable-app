@@ -1,16 +1,11 @@
 import 'package:firebase_ai/firebase_ai.dart';
 import 'package:open_wearable/apps/eargpt_gemini_live/model/eargpt_sensor_manager.dart';
+import 'package:open_wearable/apps/eargpt_gemini_live/model/data_persistence.dart';
 import 'package:open_wearable/models/logger.dart';
-import 'package:open_wearable/view_models/app_data_storage.dart';
 
 /// Manages all Gemini AI tool definitions and their execution for EarGPT
 class EarGPTTools {
   final EarGPTSensorManager sensorManager;
-
-  static const String storageAppName = 'eargpt_gemini_live';
-  static const String heartRateStorageKey = 'latest_heart_rate';
-  static const String skinTempStorageKey = 'latest_skin_temperature';
-  static const int historyDays = 7;
 
   EarGPTTools({required this.sensorManager});
 
@@ -162,88 +157,36 @@ class EarGPTTools {
     return {"posture": "$postureData"};
   }
 
-  /// Latest stored vital tool
-  Future<Map<String, Object?>> _loadLatestVital(String key, String unit) async {
-    final data = await AppDataStorage.loadData(storageAppName, key);
-    if (data == null || data['latest'] == null) {
-      throw Exception('No stored data for $key');
-    }
-    final latest = data['latest'] as Map<dynamic, dynamic>;
-    final value = latest['value'];
-    final recordedAt = latest['recorded_at'];
-    return {
-      'value': value,
-      'unit': unit,
-      'recorded_at': recordedAt,
-    };
-  }
-
-  /// Weekly summary tool
-  Future<Map<String, Object?>> _loadWeeklySummary(
-    String key,
-    String unit,
-  ) async {
-    final data = await AppDataStorage.loadData(storageAppName, key);
-    if (data == null) {
-      throw Exception('No stored data for $key');
-    }
-
-    final historyDynamic = data['history'] as List<dynamic>? ?? [];
-    final cutoff = DateTime.now()
-        .subtract(Duration(days: historyDays))
-        .microsecondsSinceEpoch;
-
-    final entries = historyDynamic.whereType<Map>().where((entry) {
-      final ts = entry['recorded_at_epoch_micros'] as int?;
-      return ts != null && ts >= cutoff;
-    }).toList();
-
-    if (entries.isEmpty) {
-      throw Exception('No data in the last $historyDays days for $key');
-    }
-
-    final values = entries
-        .map((e) => e['value'])
-        .whereType<num>()
-        .map((e) => e.toDouble())
-        .toList();
-
-    if (values.isEmpty) {
-      throw Exception('No data for $key');
-    }
-
-    final sum = values.fold<double>(0, (a, b) => a + b);
-    final avg = sum / values.length;
-    final fromTs = entries.first['recorded_at'] as String?;
-    final toTs = entries.last['recorded_at'] as String?;
-
-    return {
-      'average': avg,
-      'unit': unit,
-      'count': values.length,
-      'from': fromTs,
-      'to': toTs,
-    };
-  }
-
   /// Latest stored heart rate
   Future<Map<String, Object?>> fetchLatestHeartRate() async {
-    return _loadLatestVital(heartRateStorageKey, 'bpm');
+    return EarGPTDataPersistence.loadLatestVital(
+      EarGPTDataPersistence.heartRateStorageKey,
+      'bpm',
+    );
   }
 
   /// Latest stored skin temp
   Future<Map<String, Object?>> fetchLatestSkinTemp() async {
-    return _loadLatestVital(skinTempStorageKey, 'celsius');
+    return EarGPTDataPersistence.loadLatestVital(
+      EarGPTDataPersistence.skinTempStorageKey,
+      'celsius',
+    );
   }
 
   /// Weekly summary heart rate
   Future<Map<String, Object?>> fetchWeeklyHeartRateSummary() async {
-    return _loadWeeklySummary(heartRateStorageKey, 'bpm');
+    return EarGPTDataPersistence.loadWeeklySummary(
+      EarGPTDataPersistence.heartRateStorageKey,
+      'bpm',
+    );
   }
 
   /// Weekly summary skin temp
   Future<Map<String, Object?>> fetchWeeklySkinTempSummary() async {
-    return _loadWeeklySummary(skinTempStorageKey, 'celsius');
+    return EarGPTDataPersistence.loadWeeklySummary(
+      EarGPTDataPersistence.skinTempStorageKey,
+      'celsius',
+    );
   }
 
   //============================================================================
