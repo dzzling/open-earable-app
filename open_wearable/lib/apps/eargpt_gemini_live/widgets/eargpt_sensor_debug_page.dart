@@ -9,6 +9,7 @@ import 'package:open_wearable/apps/posture_tracker/model/attitude_tracker.dart';
 import 'package:open_wearable/apps/eargpt_gemini_live/model/eargpt_sensor_manager.dart'
     as eargpt;
 import 'package:open_wearable/apps/eargpt_gemini_live/model/gemini_session_manager.dart';
+import 'package:open_wearable/apps/eargpt_gemini_live/model/tools.dart';
 import 'package:firebase_ai/firebase_ai.dart';
 import 'package:lottie/lottie.dart';
 import 'package:open_wearable/view_models/app_data_storage.dart';
@@ -37,6 +38,7 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
   late final LiveGenerativeModel model;
   late final eargpt.EarGPTSensorManager _sensorManager;
   late final GeminiSessionManager _sessionManager;
+  late final EarGPTTools _tools;
 
   static const String _storageAppName = 'eargpt_gemini_live';
   static const String _heartRateStorageKey = 'latest_heart_rate';
@@ -91,6 +93,9 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
       },
     );
 
+    // Initialize EarGPTTools
+    _tools = EarGPTTools(sensorManager: _sensorManager);
+
     // Setup Gemini Live Generative Model
     model = FirebaseAI.googleAI().liveGenerativeModel(
       model: 'gemini-2.5-flash-native-audio-preview-12-2025',
@@ -98,15 +103,7 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
           '''You are a personal health AI assistant integrated with OpenEarable smart earbuds. You have access to real-time biometric data from the user's ear-based sensors. Keep responses concise and relevant to the user's health and activity.
           Use the provided tools to get the user's health statistics.'''),
       tools: [
-        Tool.functionDeclarations([
-          fetchHeartrateTool,
-          fetchSkinTempTool,
-          fetchLatestHeartRateTool,
-          fetchLatestSkinTempTool,
-          fetchWeeklyHeartRateSummaryTool,
-          fetchWeeklySkinTempSummaryTool,
-          fetchPostureTool
-        ]),
+        Tool.functionDeclarations(EarGPTTools.getAllToolDeclarations()),
       ],
       liveGenerationConfig:
           LiveGenerationConfig(responseModalities: [ResponseModalities.audio]),
@@ -115,7 +112,7 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
     // Initialize GeminiSessionManager
     _sessionManager = GeminiSessionManager(
       model: model,
-      toolExecutors: _toolExecutors,
+      toolExecutors: _tools.toolExecutors,
       onConversationStateChanged: () {
         if (mounted) setState(() {});
       },
@@ -146,232 +143,6 @@ class _EargptSensorDebugPageState extends State<EargptSensorDebugPage>
       setState(() {});
     }
   }
-
-  //============================================================================
-  // TOOL IMPLEMENTATIONS
-  //============================================================================
-
-  // Current heartrate
-  final fetchHeartrateTool = FunctionDeclaration(
-    'fetchHeartrate',
-    'Get the users current heartrate from the earable device.',
-    parameters: {},
-  );
-
-  // Current heartrate
-  final fetchSkinTempTool = FunctionDeclaration(
-    'fetchSkinTemp',
-    'Get the users current skin temperature from the earable device.',
-    parameters: {},
-  );
-
-  // Current posture
-  final fetchPostureTool = FunctionDeclaration(
-    'fetchPosture',
-    'Get the users current posture from the earable device.',
-    parameters: {},
-  );
-
-  // Last stored heartrate
-  final fetchLatestHeartRateTool = FunctionDeclaration(
-    'fetchLatestHeartRate',
-    'Get the latest stored heart rate value.',
-    parameters: {},
-  );
-
-  // Last stored skin temperature
-  final fetchLatestSkinTempTool = FunctionDeclaration(
-    'fetchLatestSkinTemp',
-    'Get the latest stored skin temperature value.',
-    parameters: {},
-  );
-
-  // Weekly summary heartrate
-  final fetchWeeklyHeartRateSummaryTool = FunctionDeclaration(
-    'fetchWeeklyHeartRateSummary',
-    'Get the average heart rate for the last 7 days.',
-    parameters: {},
-  );
-
-  // Weekly summary skin temperature
-  final fetchWeeklySkinTempSummaryTool = FunctionDeclaration(
-    'fetchWeeklySkinTempSummary',
-    'Get the average skin temperature for the last 7 days.',
-    parameters: {},
-  );
-
-  // Current heartrate tool
-  Future<Map<String, Object?>> fetchHeartrate() async {
-    if (!_sensorManager.ppgSensorAvailable) {
-      throw Exception("PPG sensor not available or not initialized");
-    }
-
-    double currentHR = _sensorManager.cachedHeartRate ?? 0.0;
-
-    if (_sensorManager.cachedHeartRate == null) {
-      throw Exception("Heart rate data not yet available from sensor");
-    }
-
-    logger.i("Model requested heartrate... $currentHR");
-
-    return {"heart_rate": "$currentHR BPM"};
-  }
-
-  // Current skin temperature tool
-  Future<Map<String, Object?>> fetchSkinTemp() async {
-    if (!_sensorManager.skinTempSensorAvailable) {
-      throw Exception(
-          "Skin temperature sensor not available or not initialized");
-    }
-
-    double currentSkinTemp = _sensorManager.cachedSkinTemp ?? 0.0;
-
-    if (_sensorManager.cachedSkinTemp == null) {
-      throw Exception("Skin temperature data not yet available from sensor");
-    }
-
-    logger.i("Model requested skin temperature... $currentSkinTemp");
-
-    return {"skin_temperature": "$currentSkinTemp °C"};
-  }
-
-  // Latest posture tool
-  Future<Map<String, Object?>> fetchPosture() async {
-    if (!_sensorManager.postureViewModel.hasLoadedCalibration) {
-      throw Exception("Posture tracker not calibrated or not initialized");
-    }
-
-    final currentAttitude = _sensorManager.postureViewModel.attitude;
-    final badPostureSettings =
-        _sensorManager.postureViewModel.badPostureSettings;
-
-    // Convert radians to degrees
-    final rollDegrees = currentAttitude.roll.abs() * (360 / (2 * 3.14159));
-    final pitchDegrees = currentAttitude.pitch.abs() * (360 / (2 * 3.14159));
-
-    // Check against thresholds to determine posture quality
-    final isBadRoll = rollDegrees > badPostureSettings.rollAngleThreshold;
-    final isBadPitch = pitchDegrees > badPostureSettings.pitchAngleThreshold;
-    final isBadPosture = isBadRoll || isBadPitch;
-
-    // Determine posture quality assessment
-    String postureQuality;
-    if (!isBadPosture) {
-      postureQuality = "good";
-    } else if (isBadRoll && isBadPitch) {
-      postureQuality = "poor";
-    } else {
-      postureQuality = "fair";
-    }
-
-    final postureData = {
-      "head_roll_degrees": rollDegrees.toStringAsFixed(1),
-      "head_pitch_degrees": pitchDegrees.toStringAsFixed(1),
-      "roll_threshold_degrees": badPostureSettings.rollAngleThreshold,
-      "pitch_threshold_degrees": badPostureSettings.pitchAngleThreshold,
-      "posture_quality": postureQuality,
-      "is_bad_posture": isBadPosture
-    };
-
-    logger.i("Model requested posture... $postureData");
-
-    return {"posture": "$postureData"};
-  }
-
-  // Latest stored vital tool
-  Future<Map<String, Object?>> _loadLatestVital(String key, String unit) async {
-    final data = await AppDataStorage.loadData(_storageAppName, key);
-    if (data == null || data['latest'] == null) {
-      throw Exception('No stored data for $key');
-    }
-    final latest = data['latest'] as Map<dynamic, dynamic>;
-    final value = latest['value'];
-    final recordedAt = latest['recorded_at'];
-    return {
-      'value': value,
-      'unit': unit,
-      'recorded_at': recordedAt,
-    };
-  }
-
-  // Weekly summary tool
-  Future<Map<String, Object?>> _loadWeeklySummary(
-    String key,
-    String unit,
-  ) async {
-    final data = await AppDataStorage.loadData(_storageAppName, key);
-    if (data == null) {
-      throw Exception('No stored data for $key');
-    }
-
-    final historyDynamic = data['history'] as List<dynamic>? ?? [];
-    final cutoff = DateTime.now()
-        .subtract(Duration(days: _historyDays))
-        .microsecondsSinceEpoch;
-
-    final entries = historyDynamic.whereType<Map>().where((entry) {
-      final ts = entry['recorded_at_epoch_micros'] as int?;
-      return ts != null && ts >= cutoff;
-    }).toList();
-
-    if (entries.isEmpty) {
-      throw Exception('No data in the last $_historyDays days for $key');
-    }
-
-    final values = entries
-        .map((e) => e['value'])
-        .whereType<num>()
-        .map((e) => e.toDouble())
-        .toList();
-
-    if (values.isEmpty) {
-      throw Exception('No data for $key');
-    }
-
-    final sum = values.fold<double>(0, (a, b) => a + b);
-    final avg = sum / values.length;
-    final fromTs = entries.first['recorded_at'] as String?;
-    final toTs = entries.last['recorded_at'] as String?;
-
-    return {
-      'average': avg,
-      'unit': unit,
-      'count': values.length,
-      'from': fromTs,
-      'to': toTs,
-    };
-  }
-
-  // Latest stored heart rate
-  Future<Map<String, Object?>> fetchLatestHeartRate() async {
-    return _loadLatestVital(_heartRateStorageKey, 'bpm');
-  }
-
-  // Latest stored skin temp
-  Future<Map<String, Object?>> fetchLatestSkinTemp() async {
-    return _loadLatestVital(_skinTempStorageKey, 'celsius');
-  }
-
-  // Weekly summary heart rate
-  Future<Map<String, Object?>> fetchWeeklyHeartRateSummary() async {
-    return _loadWeeklySummary(_heartRateStorageKey, 'bpm');
-  }
-
-  // Weekly summary skin temp
-  Future<Map<String, Object?>> fetchWeeklySkinTempSummary() async {
-    return _loadWeeklySummary(_skinTempStorageKey, 'celsius');
-  }
-
-  // Map of tool executors for smart validation + dispatch
-  Map<String, Future<Map<String, Object?>> Function()> get _toolExecutors => {
-        'fetchHeartrate': fetchHeartrate,
-        'fetchSkinTemp': fetchSkinTemp,
-        'fetchPosture': fetchPosture,
-        'fetchLatestHeartRate': fetchLatestHeartRate,
-        'fetchLatestSkinTemp': fetchLatestSkinTemp,
-        'fetchWeeklyHeartRateSummary': fetchWeeklyHeartRateSummary,
-        'fetchWeeklySkinTempSummary': fetchWeeklySkinTempSummary,
-      };
 
   //============================================================================
   // DATA PERSISTENCE
